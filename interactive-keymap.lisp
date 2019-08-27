@@ -36,18 +36,7 @@
   (message "~S finished" name)
   (pop-top-map))
 
-(defcommand call-and-exit-kmap (command exit-command) ((:command "command to run: ")
-                                                       (:command "exit command: "))
-  "This command effectively calls two other commands in succession, via run-commands.
-it is designed for use in the define-interactive-keymap macro, to implement exiting
-the keymap on keypress. "
-  (run-commands command exit-command))
-
-(defmacro define-interactive-keymap
-    (name (&key on-enter on-exit abort-if (exit-on '((kbd "RET")
-                                                     (kbd "ESC")
-                                                     (kbd "C-g"))))
-     &body key-bindings)
+(defmacro define-interactive-keymap (name (&key on-enter on-exit abort-if) &body key-bindings)
   "Declare an interactive keymap mode. This can be used for developing
 interactive modes or command trees, such as @command{iresize}.
 
@@ -58,8 +47,6 @@ interactive keymap mode, respectively. If ABORT-IF is defined, the interactive
 keymap will only be activated if calling ABORT-IF returns true.
 
 KEY-BINDINGS is a list of the following form: ((KEY COMMAND) (KEY COMMAND) ...)
-If one appends t to the end of a binding like so: ((kbd \"n\") \"cmd\" t) then
-the keymap is immediately exited after running the command. 
 
 Each element in KEY-BINDINGS declares a command inside the interactive keymap.
 Be aware that these commands won't require a prefix to run."
@@ -70,13 +57,10 @@ Be aware that these commands won't require a prefix to run."
         (parse-body key-bindings :documentation t)
       `(let ((,keymap (make-sparse-keymap)))
          ,@(loop for keyb in key-bindings
-                 collect `(define-key ,keymap ,(first keyb)
-                            ,(if (third keyb)
-                                 (concatenate 'string "call-and-exit-kmap \""
-                                              (second keyb) "\" " exit-command)
-                                 (second keyb))))
-         ,@(loop for keyb in exit-on
-                 collect `(define-key ,keymap ,keyb ,exit-command))
+                 collect `(define-key ,keymap ,@keyb))
+         (define-key ,keymap (kbd "RET") ,exit-command)
+         (define-key ,keymap (kbd "C-g") ,exit-command)
+         (define-key ,keymap (kbd "ESC") ,exit-command)
 
          (defcommand ,name () ()
            ,@decls

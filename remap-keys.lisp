@@ -25,24 +25,37 @@
 
 (in-package #:stumpwm)
 
-(export '(define-remapped-keys *remapped-keys-enabled-p*))
+(export '(define-remapped-keys))
 
-(defvar *remap-keys-window-match-list* nil)
+(defvar *remap-keys-window-class-list* nil)
 
-(defvar *remapped-keys-enabled-p* t
-  "Bool to toggle remapped-keys on/off. Defaults to t ")
-
-(defun find-remap-keys-by-window (window)
+(defun find-remap-keys-window-class (class)
   (first
    (member-if (lambda (pattern)
-                (cond
-                  ((stringp pattern)
-                   (string-match (window-class window) pattern))
-
-                  ((or (symbolp pattern) (functionp pattern))
-                   (funcall pattern window))))
-              *remap-keys-window-match-list*
+                (string-match class pattern))
+              *remap-keys-window-class-list*
               :key 'car)))
+
+(defcommand send-remapped-key () ()
+  "If the WINDOW-CLASS of the current window matches a previously
+defined REMAP-KEYS rule (see DEFINE-REMAPPED-KEYS), this command looks
+up the most recently triggered key sequence in that rule and forwards
+the new key-sequence to the target window."
+  (let* ((raw-key (first *current-key-seq*))
+         (window (current-window))
+         (window-class (window-class window))
+         (keymap (cdr (find-remap-keys-window-class window-class)))
+         (keys (cdr (assoc (print-key raw-key) keymap :test 'equal))))
+    (dformat 1 "~s ~s ~s ~s~%"
+             window
+             window-class
+             (print-key raw-key)
+             (when keys
+               (mapcar 'print-key keys)))
+    (if keys
+        (dolist (key keys)
+          (send-fake-key window key))
+        (send-fake-key window raw-key))))
 
 (defun make-remap-keys (kmap)
   (labels ((as-list (x) (if (consp x) x (list x)))
@@ -57,35 +70,11 @@
                       (mapcar #'validated-kbd target-keyseq))))
             kmap)))
 
-(defun remap-keys-grab-keys (win)
-  (let* ((keymap (cdr (find-remap-keys-by-window win)))
-         (src-keys (mapcar 'car keymap)))
-    (dolist (key src-keys)
-      (xwin-grab-key (window-xwin win) (kbd key)))))
-
-(defun remap-keys-focus-window-hook (new-focus cur-focus)
-  (declare (ignorable cur-focus))
-  (when new-focus
-    (remap-keys-grab-keys new-focus)))
-
-(defun remap-keys-event-handler (code state)
-  (let* ((raw-key (code-state->key code state))
-         (window (current-window))
-         (keymap (when window
-                   (cdr (find-remap-keys-by-window window))))
-         (keys (cdr (assoc (print-key raw-key) keymap :test 'equal))))
-    (when keys
-      (dolist (key keys)
-        (send-fake-key window (if *remapped-keys-enabled-p*
-                                  key
-                                  raw-key)))
-      t)))
-
 (defun define-remapped-keys (specs)
   "Define the keys to be remapped and their mappings. The SPECS
 argument needs to be of the following structure:
 
-  (regexp-or-function . ((\"key-to-remap\" . <new-keycodes>) ...))
+  (regexp . ((\"key-to-remap\" . <new-keycodes>) ...))
 
 EXAMPLE:
   (define-remapped-keys
@@ -97,29 +86,38 @@ EXAMPLE:
   The above form remaps Ctrl-n to Down arrow, and Ctrl-p to Up arrow
   keys.  The Ctrl-k key is remapped to the sequence of keys
   Ctrl-Shift-End followed by Ctrl-x."
-  (setq *custom-key-event-handler* nil
-        *remap-keys-window-match-list*
+  (setq *remap-keys-window-class-list*
         (mapcar (lambda (spec)
                   (let ((pattern (car spec))
                         (kmap (cdr spec)))
                     (cons pattern (make-remap-keys kmap))))
                 specs))
-  (when *remap-keys-window-match-list*
-    (add-hook *focus-window-hook* 'remap-keys-focus-window-hook)
-    (setq *custom-key-event-handler* 'remap-keys-event-handler)))
+  (let ((keys (mapcar 'car
+                      (alexandria:mappend 'cdr *remap-keys-window-class-list*))))
+    (dolist (k keys)
+      (define-key *top-map*
+          (kbd k)
+        "send-remapped-key"))))
+
+(defun unbind-remapped-keys ()
+  "Unbinds all previously remapped keybindings."
+  (let ((keys (mapcar 'car
+                      (alexandria:mappend 'cdr *remap-keys-window-class-list*))))
+    (dolist (k keys)
+      (undefine-key *top-map* (kbd k)))
+    (setq *remap-keys-window-class-list* nil)))
 
 (defcommand send-raw-key () ()
   "Prompts for a key and forwards it to the CURRENT-WINDOW."
   (message "Press a key to send")
-  (let* ((screen (current-screen))
-         (win (screen-current-window screen))
-         (k (with-focus (screen-key-window screen)
-              (read-key)))
+  (let* ((k (read-key))
          (code (car k))
-         (state (cdr k)))
+         (state (cdr k))
+         (screen (current-screen)))
     (unmap-message-window screen)
-    (when win
-      (let ((xwin (window-xwin win)))
+    (when (screen-current-window screen)
+      (let* ((win (screen-current-window screen))
+             (xwin (window-xwin win)))
         (dolist (event '(:key-press :key-release))
           (xlib:send-event xwin
                            event

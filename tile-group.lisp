@@ -83,9 +83,9 @@
           (setf (tile-group-current-frame group) frame
                 (frame-window frame) nil))
         (sync-frame-windows group (window-frame window))
+        ;; maybe show the window in its new frame
         (when (null (frame-window (window-frame window)))
-          (frame-raise-window (window-group window) (window-frame window)
-                              window nil)))))
+          (really-raise-window window)))))
 
 (defmethod group-current-head ((group tile-group))
   (if-let ((current-window (group-current-window group)))
@@ -141,22 +141,21 @@
 (defmethod group-focus-window ((group tile-group) (window float-window))
   (focus-window window))
 
-(defmethod group-button-press ((group tile-group) button x y (where (eql :root)))
+(defmethod group-button-press ((group tile-group) x y (where (eql :root)))
   (when *root-click-focuses-frame*
-    (when-let ((frame (find-frame group x y)))
-      (focus-frame group frame)
-      (unless (or (eq *mouse-focus-policy* :click)
-                  (scroll-button-keyword-p button))
-        (update-all-mode-lines)))))
+    (let* ((frame (find-frame group x y)))
+      (when frame
+        (focus-frame group frame)
+        (unless (eq *mouse-focus-policy* :click)
+          (update-all-mode-lines))))))
 
-(defmethod group-button-press ((group tile-group) button x y (where window))
+(defmethod group-button-press ((group tile-group) x y (where window))
   (declare (ignore x y))
   (when (typep where 'float-window)
     (call-next-method))
-  (when (member *mouse-focus-policy* '(:click :sloppy))
+  (when (eq *mouse-focus-policy* :click)
     (focus-all where)
-    (unless (scroll-button-keyword-p button)
-      (update-all-mode-lines))))
+    (update-all-mode-lines)))
 
 (defmethod group-root-exposure ((group tile-group))
   (show-frame-outline group nil))
@@ -210,17 +209,6 @@
 (defun group-tile-windows (group)
   (only-tile-windows (group-windows group)))
 
-(defmethod group-windows-for-cycling ((group tile-group) &key sorting)
-  (only-tile-windows (call-next-method)))
-
-(defmethod focus-next-window ((group tile-group))
-  (focus-forward group (group-windows-for-cycling group :sorting t)))
-
-(defmethod focus-prev-window ((group tile-group))
-  (focus-forward group
-                 (reverse
-                  (group-windows-for-cycling group :sorting t))))
-
 (defun tile-group-frame-head (group head)
   (group-sync-all-heads group)
   (elt (tile-group-frame-tree group) (position head (group-heads group))))
@@ -252,9 +240,9 @@
            (fwx (+ fx (frame-width f)))
            (fhy (+ fy (frame-height f))))
       (when (and
-             (<= fy y fhy)
-             (<= fx x fwx))
-        (return f)))))
+             (>= y fy) (<= y fhy)
+             (>= x fx) (<= x fwx)
+             (return f))))))
 
 
 (defun frame-set-x (frame v)
@@ -796,68 +784,28 @@ either :width or :height"
                             (sync-frame-windows group leaf)))))))))
 
 (defun balance-frames-internal (group tree)
-  "Fully balance all the frames contained in tree."
-  (labels
-      ((balance (tree x y width height)
-         (etypecase tree
-           (frame (balance-frame tree x y width height))
-           (list (balance-tree tree x y width height))))
-       (balance-frame (frame x y width height)
-         (setf (frame-x frame) x
-               (frame-y frame) y
-               (frame-width frame) width
-               (frame-height frame) height)
-         (sync-frame-windows group frame))
-       (count-splits (tree split-type)
-         "Count the number of top-level splits of split-type in tree."
-         (cond ((frame-p tree) 1)
-               ((eql split-type (tree-split-type tree))
-                (+ (count-splits (first tree) split-type)
-                   (count-splits (second tree) split-type)))
-               (t 1)))
-       (divide-dimension (value first-splits second-splits)
-         "Divide a width or height between two sides of a binary tree.
-
-         Returns two values: the number of pixels to give to the first and
-         second child, respectively.
-
-         For example: (divide-dimension 500 3 2) will divide 500 pixels into 300
-         for the first 3 splits and 200 for the second 2 splits.
-
-         "
-         ;; First divide the two groups as evenly as possible.
-         (multiple-value-bind (base remainder)
-             (truncate value (+ first-splits second-splits))
-           ;; We may have up to TOTAL-1 pixels left.  Divide those evenly
-           ;; between the two sides.  If there's 1 odd pixel left just give it
-           ;; to the first side.
-           (multiple-value-bind (extra maybe-one-extra)
-               (truncate remainder 2)
-             (values (+ (* base first-splits) extra maybe-one-extra)
-                     (+ (* base second-splits) extra)))))
-       (balance-tree (tree x y width height)
-         "Balance the binary tree to fit the given dimensions."
-         (let* ((split-type (tree-split-type tree))
-                (first-splits (count-splits (first tree) split-type))
-                (second-splits (count-splits (second tree) split-type)))
-           (ecase split-type
-             (:row (multiple-value-bind (top-height bottom-height)
-                       (divide-dimension height first-splits second-splits)
-                     (balance (first tree)
-                              x y
-                              width top-height)
-                     (balance (second tree)
-                              x (+ y top-height)
-                              width bottom-height)))
-             (:column (multiple-value-bind (left-width right-width)
-                          (divide-dimension width first-splits second-splits)
-                        (balance (first tree)
-                                 x y
-                                 left-width height)
-                        (balance (second tree)
-                                 (+ x left-width) y
-                                 right-width height)))))))
-    (balance tree (tree-x tree) (tree-y tree) (tree-width tree) (tree-height tree))))
+  "Resize all the children of tree to be of equal width or height
+depending on the tree's split direction."
+  (let* ((split-type (tree-split-type tree))
+         (fn (if (eq split-type :column)
+                 'tree-width
+                 'tree-height))
+         (side (if (eq split-type :column)
+                   :right
+                   :bottom))
+         (total (funcall fn tree)))
+    (multiple-value-bind (size rem)
+      (truncate total (length tree))
+      (loop
+        for i in tree
+        for j = rem then (1- j)
+        for totalofs = 0 then (+ totalofs ofs)
+        for ofs = (+ (- size (funcall fn i)) (if (plusp j) 1 0))
+        do
+           (expand-tree i ofs side)
+           (offset-tree-dir i totalofs side)
+           (tree-iterate i (lambda (leaf)
+                             (sync-frame-windows group leaf)))))))
 
 (defun split-frame (group how &optional (ratio 1/2))
   "Split the current frame into 2 frames. Return new frame number, if
@@ -882,7 +830,9 @@ desktop when starting."
                   (list f1 f2)
                   (funcall-on-node (tile-group-frame-head group head)
                                    (lambda (tree)
-                                     (substitute (list f1 f2) frame tree))
+                                     (if (eq (tree-split-type tree) how)
+                                         (list-splice-replace frame tree f1 f2)
+                                         (substitute (list f1 f2) frame tree)))
                                    (lambda (tree)
                                      (unless (atom tree)
                                        (find frame tree))))))
@@ -899,8 +849,6 @@ desktop when starting."
           (unhide-window (frame-window f2)))
         (frame-number f2)))))
 
-
-
 (defun draw-frame-outline (group f tl br)
   "Draw an outline around FRAME."
   (let* ((screen (group-screen group))
@@ -913,6 +861,13 @@ desktop when starting."
             (y (frame-display-y group f))
             (w (frame-width f))
             (h (frame-display-height group f)))
+        (xlib:draw-rectangle win
+                             gc
+                             (+ x 3)
+                             (+ y 3)
+                             (- w 6)
+                             (- h 6)
+                             nil)
         (when tl
           (xlib:draw-line win gc
                           x (+ halfwidth y) w 0 t)
@@ -929,8 +884,9 @@ desktop when starting."
   (clear-frame-outlines group)
   (dolist (h (if head (list head) (group-heads group)))
     (draw-frame-outline group h nil t)
-    (tree-iterate (tile-group-frame-head group h) (lambda (f)
-                                                    (draw-frame-outline group f t nil)))))
+    (tree-iterate (tile-group-frame-head group h)
+                  (lambda (f)
+                    (draw-frame-outline group f t nil)))))
 
 (defun clear-frame-outlines (group)
   "Clear the outlines drawn with DRAW-FRAME-OUTLINES."
@@ -944,15 +900,16 @@ windows used to draw the numbers in. The caller must destroy them."
               (let ((w (xlib:create-window
                         :parent (screen-root screen)
                         :x (frame-x f) :y (frame-display-y group f) :width 1 :height 1
-                        :background (screen-fg-color screen)
+                        :background (screen-bg-color screen)
                         :border (screen-border-color screen)
-                        :border-width 1
+                        :border-width 3
                         :event-mask '())))
                 (xlib:map-window w)
                 (setf (xlib:window-priority w) :above)
-                (echo-in-window w (screen-font screen)
-                                (screen-fg-color screen)
+                (echo-in-window w
+                                (screen-font screen)
                                 (screen-bg-color screen)
+                                (screen-fg-color screen)
                                 (string (get-frame-number-translation f)))
                 (xlib:display-finish-output *display*)
                 (dformat 3 "mapped ~S~%" (frame-number f))
@@ -979,13 +936,18 @@ windows used to draw the numbers in. The caller must destroy them."
           (show-frame-indicator group))
         (message "Cannot split smaller than minimum size."))))
 
-(defcommand (hsplit tile-group) (&optional (ratio "1/2")) (:string)
-"Split the current frame into 2 side-by-side frames."
-  (split-frame-in-dir (current-group) :column (read-from-string ratio)))
-
-(defcommand (vsplit tile-group) (&optional (ratio "1/2")) (:string)
-"Split the current frame into 2 frames, one on top of the other."
-  (split-frame-in-dir (current-group) :row (read-from-string ratio)))
+(flet ((parse-ratio (string)
+         (let ((*read-eval* nil))
+           (let ((ratio (rationalize (read-from-string string))))
+             (prog1 ratio
+               (assert (<= 0 ratio 1) () "Ratio should be between 0 and 1"))))))
+  (defcommand (hsplit tile-group) (ratio)
+      ((:string #1="Enter ratio: "))
+    "Split the current frame into 2 side-by-side frames."
+    (split-frame-in-dir (current-group) :column (parse-ratio ratio)))
+  (defcommand (vsplit tile-group) (ratio) ((:string #1#))
+    "Split the current frame into 2 frames, one on top of the other."
+    (split-frame-in-dir (current-group) :row (parse-ratio ratio))))
 
 (defun split-frame-eql-parts* (group dir amt)
   (when (> amt 1)
@@ -994,22 +956,23 @@ windows used to draw the numbers in. The caller must destroy them."
 
 (defun split-frame-eql-parts (group dir amt)
   "Splits frame in equal parts defined by amt."
-  (assert (> amt 1))
-  (let ((f (tile-group-current-frame group))
-        (new-frame-numbers (split-frame-eql-parts* group dir amt)))
-    (if (= (list-length new-frame-numbers) (- amt 1))
-        (progn
-          (when (frame-window f)
-            (update-decoration (frame-window f)))
-          (show-frame-indicator group))
-        (let ((head (frame-head group f)))
-          (setf (tile-group-frame-head group head)
-                (reduce (lambda (tree num)
-                          (remove-frame tree
-                                        (frame-by-number group num)))
-                        new-frame-numbers
-                        :initial-value (tile-group-frame-head group head)))
-          (message "Cannot split. Maybe current frame is too small.")))))
+  (assert (<= amt #1=10) () "Too many parts (max. ~d)" #1#)
+  (when (> amt 1)
+    (let ((f (tile-group-current-frame group))
+          (new-frame-numbers (split-frame-eql-parts* group dir amt)))
+      (if (= (list-length new-frame-numbers) (- amt 1))
+          (progn
+            (when (frame-window f)
+              (update-decoration (frame-window f)))
+            (show-frame-indicator group))
+          (let ((head (frame-head group f)))
+            (setf (tile-group-frame-head group head)
+                  (reduce (lambda (tree num)
+                            (remove-frame tree
+                                          (frame-by-number group num)))
+                          new-frame-numbers
+                          :initial-value (tile-group-frame-head group head)))
+            (message "Cannot split. Maybe current frame is too small."))))))
 
 (defcommand (hsplit-equally tile-group) (amt)
     ((:number "Enter the number of frames: "))
@@ -1062,8 +1025,7 @@ space."
           (when (frame-window l)
             (update-decoration (frame-window l)))
           (when (eq frame current)
-            (show-frame-indicator group))
-          (run-hook-with-args *remove-split-hook* l frame)))))
+            (show-frame-indicator group))))))
 
 (defcommand-alias remove remove-split)
 
@@ -1079,12 +1041,10 @@ space."
         (progn
           (mapc (lambda (w)
                   ;; windows in other frames disappear
-                  (unless (eq (window-frame w) 
-                              (tile-group-current-frame group))
+                  (unless (eq (window-frame w) (tile-group-current-frame group))
                     (hide-window w))
                   (setf (window-frame w) frame))
-                (remove-if (lambda (w) (typep w 'float-window))
-                           (head-windows group head)))
+                (head-windows group head))
           (setf (frame-window frame) win
                 (tile-group-frame-head group head) frame
                 (tile-group-current-frame group) frame)
@@ -1135,10 +1095,6 @@ the current frame."
 "Cycle through the frame tree to the next frame."
   (focus-next-frame (current-group)))
 
-(defcommand (fprev tile-group) () ()
-  "Cycle through the frame tree to the previous frame."
-  (focus-prev-frame (current-group)))
-
 (defcommand (sibling tile-group) () ()
 "Jump to the frame's sibling. If a frame is split into two frames,
 these two frames are siblings."
@@ -1151,41 +1107,22 @@ these two frames are siblings."
 (defun choose-frame-by-number (group)
   "show a number in the corner of each frame and wait for the user to
 select one. Returns the selected frame or nil if aborted."
-  (let ((wins (progn
-                (draw-frame-outlines group)
-                (draw-frame-numbers group))))
-    (multiple-value-bind (has-click ch x y)
-        (read-one-char-or-click group)
-      (if has-click
-          (let ((winner))
-            (mapc #'xlib:destroy-window wins)
-            (clear-frame-outlines group)
-            ;; frame-width and frame-height are not updated in this
-            ;; context, so we need to loop through all of them until
-            ;; we find the most satisfying one.
-            (dolist (f (group-frames group))
-              (when (and (> x (frame-x f)) (> y (frame-y f)))
-                (if winner
-                    (when (or (> (frame-x f) (frame-x winner))
-                              (> (frame-y f) (frame-y winner)))
-                      (setf winner f))
-                    (setf winner f))))
-            (ungrab-pointer)
-            winner)
-          (when ch
-            (let ((num (read-from-string (string ch) nil nil)))
-              (dformat 3 "read ~S ~S~%" ch num)
-              (mapc #'xlib:destroy-window wins)
-              (clear-frame-outlines group)
-              (find ch (group-frames group)
-                    :test 'char=
-                    :key 'get-frame-number-translation)))))))
-
+  (let ((wins (draw-frame-numbers group)))
+    (unwind-protect
+         (let* ((character (read-one-char (group-screen group)))
+                (num (read-from-string (string character) nil nil)))
+           (dformat 3 "read ~S ~S~%" character num)
+           (find character
+                 (group-frames group)
+                 :test 'eql
+                 :key 'get-frame-number-translation))
+      (mapc #'xlib:destroy-window wins)
+      (clear-frame-outlines group))))
 
 (defcommand (fselect tile-group) (frame-number) ((:frame t))
 "Display a number in the corner of each frame and let the user to
-select a frame by number or click. If @var{frame-number} is specified,
-just jump to that frame."
+select a frame by number. If @var{frame-number} is specified, just
+jump to that frame."
   (let ((group (current-group)))
     (focus-frame group frame-number)))
 
@@ -1197,10 +1134,11 @@ just jump to that frame."
     (if (atom (tile-group-frame-tree group))
         (message "No more frames!")
         (progn
-          (clear-frame-outlines group)
+          ;;(clear-frame-outlines group)
           (resize-frame group f width :width)
           (resize-frame group f height :height)
-          (draw-frame-outlines group (current-head))))))
+          ;;(draw-frame-outlines group (current-head))
+          ))))
 
 (defun clear-frame (frame group)
   "Clear the given frame."
@@ -1229,47 +1167,91 @@ just jump to that frame."
       (:right
        (values y1 y2 x2)))))
 
-(defun neighbour (direction frame frameset)
+;;
+;; NB: for a wrap-around behaviour, take care of infinite loops.
+;;
+(defun neighbour (direction frame frameset &aux (group (current-group)))
   "Returns the best neighbour of FRAME in FRAMESET on the DIRECTION edge.
    Valid directions are :UP, :DOWN, :LEFT, :RIGHT.
    eg: (NEIGHBOUR :UP F FS) finds the frame in FS that is the 'best'
    neighbour above F."
-  (let ((src-edge (ecase direction
-                    (:up :top)
-                    (:down :bottom)
-                    (:left :left)
-                    (:right :right)))
-        (opposite (ecase direction
-                    (:up :bottom)
-                    (:down :top)
-                    (:left :right)
-                    (:right :left)))
-        (best-frame nil)
-        (best-overlap 0))
-    (multiple-value-bind (src-s src-e src-offset)
-        (get-edge frame src-edge)
-      (dolist (f frameset)
-        (multiple-value-bind (s e offset)
-            (get-edge f opposite)
-          (let ((overlap (- (min src-e e)
-                            (max src-s s))))
-            ;; Two edges are neighbours if they have the same offset and their starts and ends
-            ;; overlap.  We want to find the neighbour that overlaps the most.
-            (when (and (= src-offset offset)
-                       (> overlap best-overlap))
-              (setf best-frame f)
-              (setf best-overlap overlap))))))
-    best-frame))
+  (flet ((head (frame) (frame-head group frame)))
+    (let ((src-edge (ecase direction
+                      (:up :top)
+                      (:down :bottom)
+                      (:left :left)
+                      (:right :right)))
+          (opposite (ecase direction
+                      (:up :bottom)
+                      (:down :top)
+                      (:left :right)
+                      (:right :left)))
+          (candidates)
+          (frame-head (head frame)))
+      (labels ((better (s1 s2)
+                 "Is S1 better than S2 to be a neighbour of FRAME"
+                 (destructuring-bind (f1 o1 w1 fs1) s1
+                   (declare (ignore w1))
+                   (destructuring-bind (f2 o2 w2 fs2) s2
+                     (declare (ignore w2))
+                     (let ((e1 (equalp frame-head (head f1)))
+                           (e2 (equalp frame-head (head f2))))
+                       ;; frames in the same head as frame are better
+                       ;; than other ones. otherwise, frames with a
+                       ;; higher overlap with frame are better.
+                       (cond
+                         ((and fs1 (not fs2)) t)
+                         ((eql e1 e2) (> o1 o2))
+                         (t e1))))))
+               (best (list) (caar (sort (copy-seq list) #'better))))
+        (multiple-value-bind (src-s src-e src-offset) (get-edge frame src-edge)
+          (dolist (f frameset)
+            (multiple-value-bind (s e offset) (get-edge f opposite)
+              (let ((overlap (- (min src-e e)
+                                (max src-s s))))
+                ;; Two edges are neighbours if they have the same offset
+                ;; and their starts and ends overlap.  We want to find the
+                ;; neighbour that overlaps the most.
+                (when (eql src-offset offset)
+                  (let ((window (frame-window f)))
+                    (push (list f overlap window (and window (window-fullscreen window)))
+                          candidates)))))))
+        (values
+         (best (or (remove-if #'bypassed-neighbour-p candidates :key #'first)
+                   candidates))
+         candidates)))))
 
-(defun move-focus-and-or-window (dir &optional win-p)
-  (declare (type (member :up :down :left :right) dir))
+;;; addition
+
+(define-window-slot :bypass)
+
+(defgeneric bypassed-neighbour-p (window-or-frame)
+  (:method ((w window)) (window-bypass w))
+  (:method ((f frame))
+    (when-let (w (frame-window f))
+      (bypassed-neighbour-p w))))
+
+(defun neighbour* (direction frame frameset)
+  "Get first non-bypassed window/frame in direction"
+  (when-let (frame (neighbour direction frame frameset))
+    (if (bypassed-neighbour-p frame)
+        (or (neighbour* direction frame frameset) frame)
+        frame)))
+
+(defun move-focus-and-or-window (direction &optional win-p)
+  (declare (type (member :up :down :left :right) direction))
   (let* ((group (current-group))
-         (new-frame (neighbour dir (tile-group-current-frame group) (group-frames group)))
+         ;; neighbour* instead of neighbour
+         (new-frame (neighbour* direction
+                                (tile-group-current-frame group)
+                                (group-frames group)))
          (window (current-window)))
     (when new-frame
       (if (and win-p window)
           (pull-window window new-frame)
           (focus-frame group new-frame)))))
+
+;;;;
 
 (defcommand (move-focus tile-group) (dir) ((:direction "Direction: "))
 "Focus the frame adjacent to the current one in the specified
@@ -1306,10 +1288,10 @@ direction. The following are valid directions:
 
 (defcommand (balance-frames tile-group) (&aux (group (current-group))) ()
   "Make frames the same height or width in the current frame's subtree."
-  (let ((tree (tile-group-frame-head group (current-head))))
-    (if (frame-p tree)
-        (message "There's only one frame.")
-        (balance-frames-internal group tree))))
+  (if-let ((tree (tree-parent (tile-group-frame-head group (current-head))
+                              (tile-group-current-frame group))))
+    (balance-frames-internal group tree)
+    (message "There's only one frame.")))
 
 (defun unfloat-window (window group)
   ;; maybe find the frame geometrically closest to this float?

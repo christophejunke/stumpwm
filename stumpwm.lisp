@@ -233,12 +233,7 @@ further up. "
       (unwind-protect
            (progn
              (let ((*initializing* t))
-               ;; Start hashing the user's PATH so completion is quick
-               ;; the first time they try to run a command.
-               (sb-thread:make-thread #'rehash)
-               
-               ;; we need to do this first because init-screen grabs
-               ;; keys
+               ;; we need to do this first because init-screen grabs keys
                (update-modifier-map)
                ;; Initialize all the screens
                (setf *screen-list* (loop for i in (xlib:display-roots *display*)

@@ -93,12 +93,13 @@
           (xlib:convert-selection selection :utf8_string (screen-input-window (current-screen)) :stumpwm-selection)
           ;; Note: this may spend longer than timeout in this loop but it will eventually return.
           (let ((time (get-internal-real-time)))
-            (loop for ret = (xlib:process-event *display* :handler #'wait-for-selection :timeout timeout :discard-p nil)
-                  when (or ret
-                           (> (/ (- time (get-internal-real-time)) internal-time-units-per-second)
-                              timeout))
-                  ;; make sure we return a string
-                  return (or ret "")))))))
+            (loop
+               for ret = (xlib:process-event *display* :handler #'wait-for-selection :timeout timeout :discard-p nil)
+               when (or ret
+                        (> (/ (- time (get-internal-real-time)) internal-time-units-per-second)
+                           timeout))
+               ;; make sure we return a string
+               return (or ret "")))))))
 
 ;;; Commands
 

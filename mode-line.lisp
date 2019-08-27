@@ -131,6 +131,18 @@ timer.")
 (defvar *mode-lines* ()
   "All current mode lines.")
 
+(defstruct (mode-line (:constructor %make-mode-line))
+  screen
+  head
+  window
+  format
+  position
+  contents
+  cc
+  height
+  factor
+  (mode :stump))
+
 ;;; Utilities
 
 (defun screen-mode-lines (screen)
@@ -258,14 +270,11 @@ timer.")
 (defun destroy-mode-line (ml)
   (run-hook-with-args *destroy-mode-line-hook* ml)
   (xlib:destroy-window (mode-line-window ml))
-  (xlib:free-gcontext (mode-line-gc ml))
+  (when (mode-line-gc ml)
+    (xlib:free-gcontext (mode-line-gc ml)))
   (setf *mode-lines* (remove ml *mode-lines*))
   (sync-mode-line ml)
   (maybe-cancel-mode-line-timer))
-
-(defun destroy-all-mode-lines ()
-  (dolist (ml *mode-lines*)
-    (destroy-mode-line ml)))
 
 ;;; Formatting
 

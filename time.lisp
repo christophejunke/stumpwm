@@ -40,8 +40,7 @@
           *time-modeline-string*
           time-format
           echo-date
-          time
-          refresh-time-zone))
+          time))
 
 (defvar *time-format-string-default* "%a %b %e %Y %k:%M:%S"
   "The default value for `echo-date', (e.g, Thu Mar  3 2005 23:05:25).")
@@ -109,15 +108,6 @@
   (message "~a" (time-format *time-format-string-default*)))
 
 (defcommand-alias time echo-date)
-
-(defcommand refresh-time-zone () ()
-  "Refresh the time zone information from the system.
-
-If you change the system time zone while StumpWM is running you can
-run this command to make StumpWM notice the change."
-  (sb-alien:alien-funcall
-    (sb-alien:extern-alien "tzset" (function sb-alien:void))))
-
 
 ;;; ------------------------------------------------------------------
 ;;; Helper functions

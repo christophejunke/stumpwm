@@ -24,8 +24,7 @@
 
 (in-package #:stumpwm)
 
-(export '(*default-bg-color*
-          current-screen
+(export '(current-screen
           current-window
           screen-current-window
           screen-number
@@ -44,9 +43,6 @@
           set-msg-border-width
           set-frame-outline-width
           set-font))
-
-(defvar *default-bg-color* #x333333
-  "Default color for the desktop background.")
 
 ;; Screen helper functions
 
@@ -399,12 +395,9 @@ FOCUS-WINDOW is an extra window used for _NET_SUPPORTING_WM_CHECK."
            (float-focus-color (ac +default-float-focus-color+))
            (float-unfocus-color (ac +default-float-unfocus-color+))
            (font (open-font *display*
-                            (cond ((font-exists-p +default-font-name+)
-                                   +default-font-name+)
-                                  ((font-exists-p "fixed")
-                                   "fixed")
-                                  (t
-                                   "*"))))
+                            (if (font-exists-p +default-font-name+)
+                                +default-font-name+
+                                "*")))
            (message-window (xlib:create-window :parent screen-root
                                                :x 0 :y 0 :width 1 :height 1
                                                :colormap default-colormap
@@ -449,13 +442,13 @@ FOCUS-WINDOW is an extra window used for _NET_SUPPORTING_WM_CHECK."
                                                  :colormap default-colormap
                                                  :background bg-color
                                                  :border border-color
-                                                 :border-width 1
+                                                 :border-width 3
                                                  :event-mask '(:exposure))
                                   :frame-outline-gc (xlib:create-gcontext
                                                      :drawable screen-root
                                                      :font (when (typep font 'xlib:font) font)
                                                      :foreground fg-color
-                                                     :background fg-color
+                                                     :background bg-color
                                                      :line-style :double-dash
                                                      :line-width +default-frame-outline-width+)
                                   :message-cc (make-ccontext
@@ -475,8 +468,7 @@ FOCUS-WINDOW is an extra window used for _NET_SUPPORTING_WM_CHECK."
             (ccontext-screen (screen-message-cc screen)) screen
             (screen-heads screen) (make-screen-heads screen screen-root)
             (tile-group-frame-tree group) (copy-heads screen)
-            (tile-group-current-frame group) (first (tile-group-frame-tree group))
-            (xlib:window-background screen-root) *default-bg-color*)
+            (tile-group-current-frame group) (first (tile-group-frame-tree group)))
       ;; The focus window is mapped at all times
       (xlib:map-window (screen-focus-window screen))
       (xlib:map-window (screen-key-window screen))

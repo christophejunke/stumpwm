@@ -53,7 +53,8 @@
   (when *resize-hides-windows*
     (dolist (f (head-frames (current-group) (current-head)))
       (clear-frame f (current-group))))
-  (draw-frame-outlines (current-group) (current-head)))
+  ;; (draw-frame-outlines (current-group) (current-head))
+  )
 
 (defcommand resize-direction (d)
   ((:direction "Direction: "))

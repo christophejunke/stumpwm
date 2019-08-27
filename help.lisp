@@ -48,17 +48,53 @@
                                   (:right (format nil "~a~a~a" (if (= c 0) "" padstr) len s)))))))
     (apply 'mapcar 'concat (or cols '(nil)))))
 
+(defun prepare-bindings (keymaps)
+  "Compute maximum key width and key strings for keybindings in keymaps
+
+The primary return value is the maximum string length for the keys in
+keymaps. The secondary return value is an alist of (key . command)
+entries where both KEY and COMMAND are strings."
+  (loop
+     for map in keymaps
+     for (size bindings) = (loop
+                              for binding in (kmap-bindings map)
+                              for key = (print-key (binding-key binding))
+                              for command = (binding-command binding)
+                              maximize (length key) into size
+                              collect (cons key command) into bindings
+                              finally (return (list (or size 0) bindings)))
+     maximize size into max-size
+     nconc bindings into all-bindings
+     finally
+       (return
+         (values
+          (or max-size 0)
+          (stable-sort (stable-sort (delete-duplicates all-bindings
+                                                       :test #'equalp)
+                                    #'string<
+                                    :key #'car)
+                       #'string<
+                       :key #'cdr)))))
+
 (defun display-bindings-for-keymaps (key-seq &rest keymaps)
-  (let* ((screen (current-screen))
-         (data (mapcan (lambda (map)
-                         (mapcar (lambda (b) (format nil "^5*~5a^n ~a" (print-key (binding-key b)) (binding-command b))) (kmap-bindings map)))
-                       keymaps))
-         (cols (ceiling (1+ (length data))
-                        (truncate (- (head-height (current-head)) (* 2 (screen-msg-border-width screen)))
-                                  (font-height (screen-font screen))))))
-    (message-no-timeout "Prefix: ~a~%~{~a~^~%~}"
-                        (print-key-seq key-seq)
-                        (or (columnize data cols) '("(EMPTY MAP)")))))
+  (multiple-value-bind (width key-commands) (prepare-bindings keymaps)
+    (let* ((screen (current-screen))
+           (data (mapcar
+                  (lambda (binding)
+                    (destructuring-bind (key . command) binding
+                      (format nil
+                              " ^(:fg \"#ff0\")~v@a^n ~a "
+                              width
+                              key
+                              command)))
+                  key-commands))
+           (cols (ceiling (1+ (length data))
+                          (truncate (- (head-height (current-head)) (* 2 (screen-msg-border-width screen)))
+                                    (font-height (screen-font screen))))))
+      (message-no-timeout "Prefix: ~a~%~{~a~^~%~}"
+                          (print-key-seq key-seq)
+                          (or (columnize data cols :pad 5)
+                              '("(EMPTY MAP)"))))))
 
 (defcommand commands () ()
 "List all available commands."

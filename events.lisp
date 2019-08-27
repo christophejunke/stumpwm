@@ -45,12 +45,12 @@
 
 ;;; Configure request
 
-(flet ((has-x (mask) (logbitp 0 mask))
-       (has-y (mask) (logbitp 1 mask))
-       (has-w (mask) (logbitp 2 mask))
-       (has-h (mask) (logbitp 3 mask))
-       (has-bw (mask) (logbitp 4 mask))
-       (has-stackmode (mask) (logbitp 6 mask)))
+(flet ((has-x (mask) (= 1 (logand mask 1)))
+       (has-y (mask) (= 2 (logand mask 2)))
+       (has-w (mask) (= 4 (logand mask 4)))
+       (has-h (mask) (= 8 (logand mask 8)))
+       (has-bw (mask) (= 16 (logand mask 16)))
+       (has-stackmode (mask) (= 64 (logand mask 64))))
   (defun configure-managed-window (win x y width height stack-mode value-mask)
     ;; Grant the configure request but then maximize the window after the
     ;; granting.
@@ -88,6 +88,8 @@
       (when (has-bw value-mask)
         (setf (xlib:drawable-border-width xwin) border-width)))))
 
+(defvar *event-window*)
+
 (define-stump-event-handler :configure-request (stack-mode #|parent|# window #|above-sibling|# x y width height border-width value-mask)
   (dformat 3 "CONFIGURE REQUEST ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
   (if-let ((win (find-window window)))
@@ -103,10 +105,12 @@
         ((equalp old-heads new-heads)
          (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
         (t
-         (dformat 1 "Updating Xrandr or Xinerama configuration for ~S.~%" screen)
+         (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
          (if new-heads
              (progn (head-force-refresh screen new-heads)
-                    (update-mode-lines screen))
+                    (update-mode-lines screen)
+                    (loop for new-head in new-heads
+                       do (run-hook-with-args *new-head-hook* new-head screen)))
              (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
@@ -197,14 +201,15 @@ The Caller is responsible for setting up the input focus."
     (when update-fn
       (funcall update-fn key-seq))
     (cond ((kmap-or-kmap-symbol-p match)
-           (when grab
-             (grab-pointer (current-screen)))
-           (let* ((code-state (read-key-no-modifiers))
-                  (code (car code-state))
-                  (state (cdr code-state)))
-             (unwind-protect
-                  (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
-               (when grab (ungrab-pointer)))))
+           (with-focus (screen-key-window (current-screen))
+             (when grab
+               (grab-pointer (current-screen)))
+             (let* ((code-state (read-key-no-modifiers))
+                    (code (car code-state))
+                    (state (cdr code-state)))
+               (unwind-protect
+                    (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
+                 (when grab (ungrab-pointer))))))
           (match
            (values match key-seq))
           ((and (find key (list (kbd "?")
@@ -235,37 +240,30 @@ The Caller is responsible for setting up the input focus."
   dispatch further based on the value in *current-key-seq*. See the
   REMAP-KEYS contrib module for a working use case.")
 
-(defvar *custom-key-event-handler* nil
-  "A custom key event handler can be set in this variable,
-  which will take precedence over the keymap based handler defined in
-  the default :KEY-PRESS event handler.")
-
 (define-stump-event-handler :key-press (code state #|window|#)
   (labels ((get-cmd (code state)
-             (with-focus (screen-key-window (current-screen))
-               (handle-keymap (top-maps) code state nil t nil))))
+             (handle-keymap (top-maps) code state nil t nil)))
     (unwind-protect
-         (or (and *custom-key-event-handler*
-                  (funcall *custom-key-event-handler* code state))
-             ;; modifiers can sneak in with a race condition. so avoid that.
-             (unless (is-modifier code)
-               (multiple-value-bind (cmd key-seq) (get-cmd code state)
-                 (cond
-                   ((eq cmd t))
-                   (cmd
-                    (unmap-message-window (current-screen))
-                    (let ((*current-key-seq* key-seq))
-                      (eval-command cmd t))
-                    t)
-                   (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq)))))))))))
+         ;; modifiers can sneak in with a race condition. so avoid that.
+         (unless (is-modifier code)
+           (multiple-value-bind (cmd key-seq) (get-cmd code state)
+             (cond
+               ((eq cmd t))
+               (cmd
+                (unmap-message-window (current-screen))
+                (let ((*current-key-seq* key-seq))
+                  (eval-command cmd t))
+                t)
+               (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq))))))))))
 
 (defun bytes-to-window (bytes)
-  "Combine a list of 4 8-bit bytes into a 32-bit number. This is because
-ratpoison sends the rp_command_request window in 8 byte chunks."
-  (logior (first bytes)
-          (ash (second bytes) 8)
-          (ash (third bytes) 16)
-          (ash (fourth bytes) 24)))
+  "A sick hack to assemble 4 bytes into a 32 bit number. This is
+because ratpoison sends the rp_command_request window in 8 byte
+chunks."
+  (+ (first bytes)
+     (ash (second bytes) 8)
+     (ash (third bytes) 16)
+     (ash (fourth bytes) 24)))
 
 (defun handle-rp-commands (root)
   "Handle a ratpoison style command request."
@@ -479,16 +477,16 @@ converted to an atom is removed."
            (activate-fullscreen window))))))
 
 (defun maybe-map-window (window)
-  (if (deny-request-p window *deny-map-request*)
-      (unless *suppress-deny-messages*
-        (if (eq (window-group window) (current-group))
-            (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
-            (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
-      (if (typep window 'tile-window)
-          (frame-raise-window (window-group window) (window-frame window) window
-                              (eq (window-frame window)
-                                  (tile-group-current-frame (window-group window))))
-          (raise-window window))))
+  ;; fix?
+  (unless (typep window 'float-window)
+    (if (deny-request-p window *deny-map-request*)
+        (unless *suppress-deny-messages*
+          (if (eq (window-group window) (current-group))
+              (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
+              (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
+        (frame-raise-window (window-group window) (window-frame window) window
+                            (eq (window-frame window)
+                                (tile-group-current-frame (window-group window)))))))
 
 (defun maybe-raise-window (window)
   (if (deny-request-p window *deny-raise-request*)
@@ -589,47 +587,26 @@ the window in it's frame."
         (focus-all win)
         (update-all-mode-lines)))))
 
-(defun decode-button-code (code)
-  "Translate the mouse button number into a more readable format"
-  (ecase code
-    (1 :left-button)
-    (2 :middle-button)
-    (3 :right-button)
-    (4 :wheel-up)
-    (5 :wheel-down)
-    (6 :wheel-left)
-    (7 :wheel-right)
-    (8 :browser-back)
-    (9 :browser-front)))
-
-(defun scroll-button-keyword-p (button)
-  "Checks if button keyword is generated from the scroll wheel."
-  (or (eq button :wheel-down) (eq button :wheel-up)
-      (eq button :wheel-left) (eq button :wheel-right)))
-
 (define-stump-event-handler :button-press (window code x y child time)
-  (let ((button (decode-button-code code))
-        (screen (find-screen window))
+  (let ((screen (find-screen window))
         (mode-line (find-mode-line-by-window window))
         (win (find-window-by-parent window (top-windows))))
-    (run-hook-with-args *click-hook* screen code x y)
     (cond
       ((and screen (not child))
-       (group-button-press (screen-current-group screen) button x y :root)
+       (group-button-press (screen-current-group screen) x y :root)
        (run-hook-with-args *root-click-hook* screen code x y))
       (mode-line
        (run-hook-with-args *mode-line-click-hook* mode-line code x y))
       (win
-       (group-button-press (window-group win) button x y win))))
+       (group-button-press (window-group win) x y win))))
   ;; Pass click to client
   (xlib:allow-events *display* :replay-pointer time))
 
 (defun make-xlib-window (drawable)
   "For some reason the CLX xid cache screws up returns pixmaps when
 they should be windows. So use this function to make a window out of DRAWABLE."
-  (make-instance 'xlib:window
-                 :id (xlib:drawable-id drawable)
-                 :display *display*))
+  (xlib::make-window :id (xlib:drawable-id drawable)
+                     :display *display*))
 
 (defun handle-event (&rest event-slots &key display event-key &allow-other-keys)
   (declare (ignore display))
@@ -648,7 +625,8 @@ they should be windows. So use this function to make a window out of DRAWABLE."
       ;; pixmap and a window.
       (when (and win (not (xlib:window-p win)))
         (dformat 10 "Pixmap Workaround! ~s should be a window!~%" win)
-        (setf (getf event-slots :window) (make-xlib-window win)))
+        (setf win (make-xlib-window win))
+        (setf (getf event-slots :window) win))
       (handler-case
           (progn
             ;; This is not the stumpwm top level, but if the restart
@@ -657,7 +635,8 @@ they should be windows. So use this function to make a window out of DRAWABLE."
             ;; reprocessed after restarting to the top level. So fake
             ;; it, and put the restart here.
             (with-simple-restart (top-level "Return to stumpwm's top level")
-              (apply eventfn event-slots))
+              (let ((*event-window* win))
+                (apply eventfn event-slots)))
             (xlib:display-finish-output *display*))
         ((or xlib:window-error xlib:drawable-error) (c)
           ;; Asynchronous errors are handled in the error handler.

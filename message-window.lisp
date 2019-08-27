@@ -27,9 +27,12 @@
 (export '(echo-string
           err
           message
-          gravity-coords
-          with-message-queuing
-          *queue-messages-p*))
+          gravity-coords))
+
+(defun max-width (font l)
+  "Return the width of the longest string in L using FONT."
+  (loop for i in l
+        maximize (text-line-width font i :translate #'translate-id)))
 
 (defgeneric gravity-coords (gravity width height minx miny maxx maxy)
   (:documentation "Get the X and Y coordinates to place something of width WIDTH
@@ -63,15 +66,6 @@ GRAVITY."))
 (define-simple-gravity :bottom :center :max)
 (define-simple-gravity :center :center :center)
 
-(defun message-window-real-gravity (screen)
-  "Returns the gravity that should be used when displaying the
-message window, taking into account *message-window-gravity*
-and *message-window-input-gravity*."
-  (if (eq (xlib:window-map-state (screen-input-window screen))
-          :unmapped)
-      *message-window-gravity*
-      *message-window-input-gravity*))
-
 (defun setup-win-gravity (screen win gravity)
   "Position the x, y of the window according to its gravity. This
 function expects to be wrapped in a with-state for win."
@@ -96,7 +90,7 @@ function expects to be wrapped in a with-state for win."
       (setf (xlib:drawable-height win) (+ height (* *message-window-y-padding* 2))
             (xlib:drawable-width win) (+ width (* *message-window-padding* 2))
             (xlib:window-priority win) :above)
-      (setup-win-gravity screen win (message-window-real-gravity screen)))
+      (setup-win-gravity screen win *message-window-gravity*))
     (xlib:map-window win)
     (incf (screen-ignore-msg-expose screen))
     ;; Have to flush this or the window might get cleared
@@ -173,15 +167,29 @@ function expects to be wrapped in a with-state for win."
         ;; If it's already mapped it'll appear briefly in the wrong
         ;; place, so unmap it first.
         (xlib:unmap-window w)
-        (xlib:with-state (w)
-          (setf (xlib:drawable-x w) (+ (frame-x frame)
-                                       (truncate (- (frame-width frame) (text-line-width font string)) 2))
-                (xlib:drawable-y w) (+ (frame-display-y group frame)
-                                       (truncate (- (frame-height frame) (font-height font)) 2))
-                (xlib:window-priority w) :above))
-        (xlib:map-window w)
-        (echo-in-window w font (screen-fg-color (current-screen)) (screen-bg-color (current-screen)) string)
-        (reset-frame-indicator-timer)))))
+        (when (frame-window (tile-group-current-frame group))
+          (xlib:with-state (w)          
+            (multiple-value-bind (twidth theight)
+                #1=(echo-in-window w
+                                   font
+                                   #xffffff
+                                   #x000000
+                                   string)
+                (setf (xlib:drawable-x w)
+                      (+ (frame-x frame) (middle twidth (frame-width frame)))
+                    
+                      (xlib:drawable-y w)
+                      (+ (frame-display-y group frame)
+                         (middle theight (frame-height frame)))
+                    
+                      (xlib:window-priority w)
+                      :above)))
+          (xlib:map-window w)
+          #1#
+          (reset-frame-indicator-timer))))))
+
+(defun middle (size capacity)
+  (truncate (- capacity size) 2))
 
 (defun echo-in-window (win font fg bg string)
   (let* ((height (font-height font))
@@ -191,12 +199,19 @@ function expects to be wrapped in a with-state for win."
                                          :background bg))
          (width (text-line-width font string)))
     (xlib:with-state (win)
-      (setf (xlib:drawable-height win) height
-            (xlib:drawable-width win) width))
+      (setf (xlib:drawable-height win) (max (xlib:drawable-height win) height)
+            (xlib:drawable-width win) (max (xlib:drawable-width win) width)))
     (xlib:clear-area win)
     (xlib:display-finish-output *display*)
-    (draw-image-glyphs win gcontext font 0
-                       (font-ascent font) string :translate #'translate-id :size 16)))
+    (draw-image-glyphs win
+                       gcontext
+                       font
+                       (middle width (xlib:drawable-width win))
+                       (+ (font-ascent font) (middle height (xlib:drawable-height win)))
+                       string
+                       :translate #'translate-id
+                       :size 16)
+    (values (xlib:drawable-width win) (xlib:drawable-height win))))
 
 (defun push-last-message (screen strings highlights)
   ;; only push unique messages
@@ -218,52 +233,10 @@ function expects to be wrapped in a with-state for win."
   (let ((*record-last-msg-override* t))
     (apply 'echo-string-list screen (nth n (screen-last-msg screen)) (nth n (screen-last-msg-highlights screen)))))
 
-(defvar *queue-messages-p* nil
-  "When non-nil, ECHO-STRING-LIST will retain old messages in addition to new ones.
-When the value is :new-on-bottom, new messages are added to the bottom as in a log file.
-See also WITH-MESSAGE-QUEUING.")
-
-(defmacro with-message-queuing (new-on-bottom-p &body body)
-  "Queue all messages sent by (MESSAGE ...), (ECHO-STRING ...), (ECHO-STRING-LIST ...)
- forms within BODY without clobbering earlier messages.
-When NEW-ON-BOTTOM-P is non-nil, new messages are queued at the bottom."
-  `(progn
-     ;; clear current messages if not already queueing
-     (unless *queue-messages-p*
-       (setf (screen-current-msg (current-screen)) nil
-             (screen-current-msg-highlights (current-screen)) nil))
-     (let ((*queue-messages-p* ,(if new-on-bottom-p :new-on-bottom t)))
-       ,@body)))
-
-(defun combine-new-old-messages (new new-highlights
-                                 old old-highlights &key new-on-bottom-p)
-  "combine NEW and OLD messages and their highlights according to NEW-ON-TOP-P"
-  (let (top top-highlights bot bot-highlights)
-    (if new-on-bottom-p
-        ;; new messages added to the bottom, like a log file
-        (setf top old top-highlights old-highlights
-              bot new bot-highlights new-highlights)
-        ;; new messages at the top
-        (setf bot old bot-highlights old-highlights
-              top new top-highlights new-highlights))
-    (values (append top bot)
-            (append top-highlights
-                    (loop for idx in bot-highlights
-                       with offset = (length top)
-                       collect (+ idx offset))))))
-
 (defun echo-string-list (screen strings &rest highlights)
   "Draw each string in l in the screen's message window. HIGHLIGHT is
   the nth entry to highlight."
   (when strings
-    (when *queue-messages-p*
-      (multiple-value-bind (combined-strings combined-highlights)
-          (combine-new-old-messages
-           strings highlights
-           (screen-current-msg screen) (screen-current-msg-highlights screen)
-           :new-on-bottom-p (eq *queue-messages-p* :new-on-bottom))
-        (setf strings combined-strings
-              highlights combined-highlights)))
     (unless *executing-stumpwm-command*
       (multiple-value-bind (width height)
           (rendered-size strings (screen-message-cc screen))

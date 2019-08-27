@@ -37,8 +37,7 @@
   "Display a menu with the active restarts and let the user pick
 one. Error is the error being recovered from. If the user aborts the
 menu, the error is re-signalled."
-  (let* ((*hooks-enabled-p* nil) ;;disable hooks to avoid deadlocks involving errors in *message-hook*
-         (restart (select-from-menu (current-screen)
+  (let ((restart (select-from-menu (current-screen)
                                    (mapcar (lambda (r)
                                              (list (format nil "[~a] ~a"
                                                            (restart-name r)
@@ -112,7 +111,8 @@ your X server and CLX implementation support XTEST."
 filename. @var{path} is by default the @env{PATH} evironment variable
 but can be specified. It should be a string containing each directory
 seperated by a colon."
-  (loop for p in path
+  (sort
+   (loop for p in path
          for dir = (probe-path p)
          when dir
            nconc (loop for file in (directory (merge-pathnames (make-pathname :name :wild :type :wild) dir)
@@ -121,13 +121,11 @@ seperated by a colon."
                        when (pathname-is-executable-p file)
                          collect (if full-path
                                      (namestring file)
-                                     namestring))))
+                                     namestring)))
+   #'string<))
 
 (defstruct path-cache
   programs modification-dates paths)
-
-(defvar *path-cache-lock* (sb-thread:make-mutex)
-  "A lock for accessing the *path-cache* during calls to rehash.")
 
 (defvar *path-cache* nil
   "A cache containing the programs in the path, used for completion.")
@@ -139,13 +137,12 @@ seperated by a colon."
                            (file-write-date p)))
                        paths)))
     (finish-output)
-    (sb-thread:with-mutex (*path-cache-lock*)
-      (unless (and *path-cache*
-                   (equal (path-cache-paths *path-cache*) paths)
-                   (equal (path-cache-modification-dates *path-cache*) dates))
-        (setf *path-cache* (make-path-cache :programs (programs-in-path nil paths)
-                                            :modification-dates dates
-                                            :paths paths))))))
+    (unless (and *path-cache*
+                 (equal (path-cache-paths *path-cache*) paths)
+                 (equal (path-cache-modification-dates *path-cache*) dates))
+      (setf *path-cache* (make-path-cache :programs (programs-in-path nil paths)
+                                          :modification-dates dates
+                                          :paths paths)))))
 
 (defun complete-program (base)
   "return the list of programs in @var{*path-cache*} whose names begin
@@ -155,8 +152,7 @@ with base. Automagically update the cache."
                      (when (<= (length base) (length p))
                        (string= base p
                                 :end1 (length base)
-                                :end2 (length base)))) 
-                 (path-cache-programs *path-cache*)))
+                                :end2 (length base)))) (path-cache-programs *path-cache*)))
 
 (defcommand run-shell-command (cmd &optional collect-output-p) ((:shell "/bin/sh -c "))
   "Run the specified shell command. If @var{collect-output-p} is @code{T}
@@ -230,7 +226,6 @@ differs from RESTART, which restarts the unix process.
 
 Since the process isn't restarted, existing customizations remain
 after the restart."
-  (destroy-all-mode-lines)
   (throw :top-level :restart))
 
 (defcommand restart-hard () ()
@@ -238,7 +233,6 @@ after the restart."
 made and you wish to replace the existing process with it.
 
 Any run-time customizations will be lost after the restart."
-  (destroy-all-mode-lines)
   (throw :top-level :hup-process))
 
 (defun find-matching-windows (props all-groups all-screens)

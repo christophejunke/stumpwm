@@ -18,5 +18,4 @@
                                                 (stumpwm:stumpwm)
                                                 0)
                                     :executable t
-                                    :purify t
-                                    :compression (if (member :sb-core-compression *features*) @COMPRESSION@ nil))
+                                    :purify t)

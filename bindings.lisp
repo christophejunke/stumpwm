@@ -58,14 +58,9 @@ the list (inactive maps being skipped). In general the order should go
 from most specific groups to most general groups.")
 
 (defvar *group-top-map* nil)
-(defvar *group-root-map* nil
-  "Commands specific to a group context hang from this keymap.
-It is available as part of the @dnf{prefix map}.")
+(defvar *group-root-map* nil)
 (defvar *tile-group-top-map* nil)
-(defvar *tile-group-root-map* nil
-  "Commands specific to a tile-group context hang from this keymap.
-It is available as part of the @dnf{prefix map} when the active group
-is a tile group.")
+(defvar *tile-group-root-map* nil)
 
 ;; Do it this way so its easier to wipe the map and get a clean one.
 (defmacro fill-keymap (map &rest bindings)
@@ -117,9 +112,6 @@ is a tile group.")
 
 (fill-keymap *group-root-map*
   (kbd "C-u") "next-urgent"
-  (kbd "M-n")     "next"
-  (kbd "M-p")     "prev"
-  (kbd "o")       "other"
   (kbd "w")   "windows"
   (kbd "C-w") "windows"
   (kbd "DEL") "repack-window-numbers"
@@ -151,13 +143,14 @@ is a tile group.")
 (fill-keymap *tile-group-root-map*
   (kbd "n")       "pull-hidden-next"
   (kbd "C-n")     "pull-hidden-next"
+  (kbd "M-n")     "next"
   (kbd "C-M-n")   "next-in-frame"
   (kbd "SPC")     "pull-hidden-next"
   (kbd "C-SPC")   "pull-hidden-next"
   (kbd "p")       "pull-hidden-previous"
   (kbd "C-p")     "pull-hidden-previous"
+  (kbd "M-p")     "prev"
   (kbd "C-M-p")   "prev-in-frame"
-  (kbd "P")       "place-current-window"
   (kbd "W")       "place-existing-windows"
   *escape-key*     "pull-hidden-other"
   (kbd "M-t")     "other-in-frame"
@@ -175,6 +168,7 @@ is a tile group.")
   (kbd "s")       "vsplit"
   (kbd "S")       "hsplit"
   (kbd "r")       "iresize"
+  (kbd "o")       "fnext"
   (kbd "TAB")     "fnext"
   (kbd "M-TAB")   "fother"
   (kbd "f")       "fselect"

@@ -139,7 +139,7 @@ out, an element can just be the argument type."
              (declare (ignorable %interactivep%))
              (run-hook-with-args *pre-command-hook* ',name)
              (multiple-value-prog1
-                 (progn ,@body)
+                 (catch 'error ,@body)
                (run-hook-with-args *post-command-hook* ',name))))
          (export ',name)
          (setf (gethash ',name *command-hash*)
@@ -482,12 +482,9 @@ then describes the symbol."
 
 (define-stumpwm-type :shell (input prompt)
   (declare (ignore prompt))
-  (let ((prompt (format nil "~A -c " *shell-program*))
-        (*input-history* *input-shell-history*))
-    (unwind-protect
-         (or (argument-pop-rest input)
-             (completing-read (current-screen) prompt 'complete-program))
-      (setf *input-shell-history* *input-history*))))
+  (let ((prompt (format nil "~A -c " *shell-program*)))
+    (or (argument-pop-rest input)
+        (completing-read (current-screen) prompt 'complete-program))))
 
 (define-stumpwm-type :rest (input prompt)
   (or (argument-pop-rest input)
@@ -555,7 +552,7 @@ user aborted."
                                           (format nil "^B^1*Error In Command '^b~a^B': ^n~A~a"
                                                   cmd c (if *show-command-backtrace*
                                                             (backtrace-string) ""))))))
-              (parse-and-run-command cmd))
+              (catch :abort (parse-and-run-command cmd)))
           (eval-command-error (err-text)
             :interactive (lambda () nil)
             (values err-text t)))

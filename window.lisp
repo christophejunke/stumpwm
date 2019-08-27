@@ -301,11 +301,13 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
 ;;      (xlib:clear-area (window-parent window)))))
 (defun escape-caret (str)
   "Escape carets by doubling them"
-  (coerce (loop :for char :across str
-                :collect char
-                :when (char= char #\^)
-                  :collect char)
-          'string))
+  (let (buf)
+    (map nil #'(lambda (ch)
+                 (push ch buf)
+                 (when (char= ch #\^)
+                   (push #\^ buf)))
+         str)
+    (coerce (reverse buf) 'string)))
 
 (defun get-normalized-normal-hints (xwin)
   (macrolet ((validate-hint (fn)
@@ -329,22 +331,21 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
 
 (defun xwin-net-wm-name (win)
   "Return the netwm wm name"
-  (when-let ((name (xlib:get-property win :_NET_WM_NAME)))
-    (utf8-to-string name)))
+  (let ((name (xlib:get-property win :_NET_WM_NAME)))
+    (when name
+      (utf8-to-string name))))
 
 (defun xwin-name (win)
-  (escape-caret (or (xwin-net-wm-name win)
-                    (xlib:wm-name win)
-                    "")))
+  (escape-caret (or
+                 (xwin-net-wm-name win)
+                 (xlib:wm-name win))))
 
 (defun update-configuration (win)
   ;; Send a synthetic configure-notify event so that the window
   ;; knows where it is onscreen.
   (xwin-send-configuration-notify (window-xwin win)
-                                  (+ (xlib:drawable-x (window-parent win))
-                                     (xlib:drawable-x (window-xwin win)))
-                                  (+ (xlib:drawable-y (window-parent win))
-                                     (xlib:drawable-y (window-xwin win)))
+                                  (xlib:drawable-x (window-parent win))
+                                  (xlib:drawable-y (window-parent win))
                                   (window-width win) (window-height win) 0))
 
 ;; FIXME: should we raise the window or its parent?
@@ -356,13 +357,7 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
     (unhide-window win)
     (update-configuration win))
   (when (window-in-current-group-p win)
-    (let ((group (window-group win)))
-      (unless (null (group-raised-window group))
-        (setf (xlib:window-priority
-               (window-parent win)
-               (window-parent (group-raised-window group)))
-              :above))
-     (setf (group-raised-window group) win)))
+    (setf (xlib:window-priority (window-parent win)) :top-if))
   (raise-top-windows))
 ;; some handy wrappers
 
@@ -693,7 +688,7 @@ and bottom_end_x."
     (setf (window-state w) +normal-state+)
     (xwin-hide w)))
 
-(defun xwin-grab-key (w key)
+(defun xwin-grab-keys (win group)
   (labels ((add-shift-modifier (key)
              ;; don't butcher the caller's structure
              (let ((key (copy-structure key)))
@@ -701,39 +696,38 @@ and bottom_end_x."
                key))
            (key-modifiers-exist-p (key)
              (and
-              (or (not (key-meta key)) (modifiers-meta *modifiers*))
-              (or (not (key-alt key)) (modifiers-alt *modifiers*))
-              (or (not (key-hyper key)) (modifiers-hyper *modifiers*))
-              (or (not (key-super key)) (modifiers-super *modifiers*)))))
-    (loop for code in (multiple-value-list (xlib:keysym->keycodes *display* (key-keysym key)))
-       ;; some keysyms aren't mapped to keycodes so just ignore them.
-       when (and code (key-modifiers-exist-p key))
-       do
-       ;; Some keysyms, such as upper case letters, need the
-       ;; shift modifier to be set in order to grab properly.
-         (let ((key
-                (if (and (not (eql (key-keysym key) (xlib:keycode->keysym *display* code 0)))
-                         (eql (key-keysym key) (xlib:keycode->keysym *display* code 1)))
-                    (add-shift-modifier key)
-                    key)))
-           (xlib:grab-key w code
-                          :modifiers (x11-mods key) :owner-p t
-                          :sync-pointer-p nil :sync-keyboard-p nil)
-           ;; Ignore capslock and numlock by also grabbing the
-           ;; keycombos with them on.
-           (xlib:grab-key w code :modifiers (x11-mods key nil t) :owner-p t
-                          :sync-keyboard-p nil :sync-keyboard-p nil)
-           (when (modifiers-numlock *modifiers*)
-             (xlib:grab-key w code
-                            :modifiers (x11-mods key t nil) :owner-p t
-                            :sync-pointer-p nil :sync-keyboard-p nil)
-             (xlib:grab-key w code :modifiers (x11-mods key t t) :owner-p t
-                            :sync-keyboard-p nil :sync-keyboard-p nil))))))
-
-(defun xwin-grab-keys (win group)
-  (dolist (map (dereference-kmaps (top-maps group)))
-    (dolist (i (kmap-bindings map))
-      (xwin-grab-key win (binding-key i)))))
+               (or (not (key-meta key)) (modifiers-meta *modifiers*))
+               (or (not (key-alt key)) (modifiers-alt *modifiers*))
+               (or (not (key-hyper key)) (modifiers-hyper *modifiers*))
+               (or (not (key-super key)) (modifiers-super *modifiers*))))
+           (grabit (w key)
+             (loop for code in (multiple-value-list (xlib:keysym->keycodes *display* (key-keysym key)))
+               ;; some keysyms aren't mapped to keycodes so just ignore them.
+               when (and code (key-modifiers-exist-p key))
+               do
+                 ;; Some keysyms, such as upper case letters, need the
+                 ;; shift modifier to be set in order to grab properly.
+                 (let ((key
+                         (if (and (not (eql (key-keysym key) (xlib:keycode->keysym *display* code 0)))
+                                  (eql (key-keysym key) (xlib:keycode->keysym *display* code 1)))
+                           (add-shift-modifier key)
+                           key)))
+                   (xlib:grab-key w code
+                                  :modifiers (x11-mods key) :owner-p t
+                                  :sync-pointer-p nil :sync-keyboard-p nil)
+                   ;; Ignore capslock and numlock by also grabbing the
+                   ;; keycombos with them on.
+                   (xlib:grab-key w code :modifiers (x11-mods key nil t) :owner-p t
+                                  :sync-keyboard-p nil :sync-keyboard-p nil)
+                   (when (modifiers-numlock *modifiers*)
+                     (xlib:grab-key w code
+                                    :modifiers (x11-mods key t nil) :owner-p t
+                                    :sync-pointer-p nil :sync-keyboard-p nil)
+                     (xlib:grab-key w code :modifiers (x11-mods key t t) :owner-p t
+                                    :sync-keyboard-p nil :sync-keyboard-p nil))))))
+    (dolist (map (dereference-kmaps (top-maps group)))
+      (dolist (i (kmap-bindings map))
+        (grabit win (binding-key i))))))
 
 (defun grab-keys-on-window (win)
   (xwin-grab-keys (window-xwin win) (window-group win)))
@@ -1007,7 +1001,7 @@ window. Default to the current window. if
 (defun kill-windows (windows)
   "Kill all windows @var{windows}"
   (dolist (window windows)
-    (xwin-kill (window-xwin window))))
+    (xwin-kill (window-xwin window)))) 
 
 (defun kill-windows-in-group (group)
    "Kill all windows in group @var{group}"
@@ -1061,20 +1055,9 @@ window. Default to the current window. if
       (when win
         (group-focus-window group win)))))
 
-(defgeneric group-windows-for-cycling (group &key sorting)
-  (:documentation "Return a list of windows in the group that can be selected with
- Next, Prev and Other command."))
-
-(defmethod group-windows-for-cycling (group &key (sorting nil))
-  (if sorting
-      (sort-windows group)
-      (group-windows group)))
-
-(defgeneric focus-other-window (group)
-  (:documentation "Focus the window in the group last focused"))
-
-(defmethod focus-other-window (group)
-  (let* ((wins (group-windows-for-cycling group))
+(defcommand other-window (&optional (group (current-group))) ()
+  "Switch to the window last focused."
+  (let* ((wins (only-tile-windows (group-windows group)))
          ;; the frame could be empty
          (win (if (group-current-window group)
                   (second wins)
@@ -1083,49 +1066,7 @@ window. Default to the current window. if
         (group-focus-window group win)
         (echo-string (group-screen group) "No other window."))))
 
-(defgeneric focus-next-window (group)
-  (:documentation "Focus the next window in the windows list of the group"))
-
-(defgeneric focus-prev-window (group)
-  (:documentation "Focus the previous window in the windows list of the group"))
-
-(defmethod focus-next-window (group)
-  (let* ((w (group-current-window group))
-         (wins (group-windows-for-cycling group :sorting t))
-         (nw (or (cadr (member w wins)) (first wins))))
-    (if (and nw
-             (not (eq w nw)))
-        (group-focus-window group nw)
-        (message "No other window."))))
-
-(defmethod focus-prev-window (group)
-  (let* ((w (group-current-window group))
-         (wins (reverse (group-windows-for-cycling group :sorting t)))
-         (nw (or (cadr (member w wins)) (first wins))))
-    (if (and nw
-             (not (eq w nw)))
-        (group-focus-window group nw)
-        (message "No other window."))))
-
-(defcommand other-window (&optional (group (current-group))) ()
-  "Switch to the window last focused."
-  (focus-other-window group))
-
 (defcommand-alias other other-window)
-
-(defcommand next () ()
-  "Go to the next window in the window list."
-  (let ((group (current-group)))
-    (if (group-current-window group)
-        (focus-next-window group)
-        (other-window group))))
-
-(defcommand prev () ()
-  "Go to the previous window in the window list."
-  (let ((group (current-group)))
-    (if (group-current-window group)
-        (focus-prev-window group)
-        (other-window group))))
 
 (defcommand renumber (nt &optional (group (current-group))) ((:number "Number: "))
   "Change the current window's number to the specified number. If another window
@@ -1189,7 +1130,8 @@ formatting. This is a simple wrapper around the command @command{windowlist}."
 (defcommand window-send-string (string &optional (window (current-window))) ((:rest "Insert: "))
   "Send the string of characters to the current window as if they'd been typed."
   (when window
-    (map nil (lambda (ch)
+    (map 'list
+         (lambda (ch)
                ;; exploit the fact that keysyms for ascii characters
                ;; are the same as their ascii value.
                (let ((sym (cond ((<= 32 (char-code ch) 127)
@@ -1200,8 +1142,7 @@ formatting. This is a simple wrapper around the command @command{windowlist}."
                                  (stumpwm-name->keysym "RET"))
                                 (t (first (xlib:character->keysyms ch *display*))))))
                  (when sym
-                   (send-fake-key window
-                                  (make-key :keysym sym)))))
+                   (send-fake-key window (make-key :keysym sym)))))
          string)))
 
 (defcommand-alias insert window-send-string)
@@ -1264,9 +1205,3 @@ The order windows are added to this list determines priority."
       (if (find w windows)
           (setf (group-on-top-windows (current-group)) (remove w windows))
           (push (current-window) (group-on-top-windows (current-group)))))))
-
-(defcommand fullscreen () ()
-  "Toggle the fullscreen mode of the current widnow. Use this for clients
-with broken (non-NETWM) fullscreen implementations, such as any program
-using SDL."
-  (update-fullscreen (current-window) 2))

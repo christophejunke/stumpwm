@@ -64,6 +64,8 @@
 (defstruct ddump
   screens current)
 
+;; (defvar *dump-current-frame-number-p* t)
+
 (defun dump-group (group &optional (window-dump-fn 'window-id))
   (labels ((dump (f)
              (make-fdump
@@ -167,8 +169,9 @@
       ;; clear references to old frames
       (dolist (w windows)
         (setf (window-frame w) nil))
-      (setf (tile-group-frame-tree group) (copy (gdump-tree gdump))
-            (tile-group-current-frame group) (find (gdump-current gdump) (group-frames group) :key 'frame-number))
+      (setf (tile-group-frame-tree group) (copy (gdump-tree gdump)))
+      (setf (tile-group-current-frame group)
+            (find (gdump-current gdump) (group-frames group) :key 'frame-number))
       ;; give any windows still not in a frame a frame
       (dolist (w windows)
         (unless (window-frame w)
@@ -223,7 +226,3 @@
 (defcommand place-existing-windows () ()
   "Re-arrange existing windows according to placement rules."
   (sync-window-placement))
-
-(defcommand place-current-window () ()
-  "Re-arrange current window according to placement rules."
-  (sync-single-window-placement (current-screen) (current-window) t))

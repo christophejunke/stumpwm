@@ -1,0 +1,22 @@
+
+* dual screen
+
+When using a dual screen, the current group is shared among monitors,
+and each screen is a frame.
+
+In order to be able to navigate independantly on each monitor, a
+possible implementation that could also benefit the single monitor
+case is to allow a frame to swtich into different subtrees
+configurations.
+
+(defgrammar frame
+  (leaf)
+  (hsplit frame)
+  (vsplit frame))
+
+Groups are not very different from frames.
+
+
+* focus
+
+add timestamp of last focus for window, for sorting by most recent
